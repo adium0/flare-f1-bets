@@ -45,15 +45,25 @@ export const getExplorerTxUrl = (txHash: string) =>
 export const getExplorerAddressUrl = (address: string) => 
   `${COSTON2_CONFIG.explorerUrl}/address/${address}`;
 
-// Helper to convert string to bytes32
+// Helper to convert string to bytes32 (browser-compatible)
 export const stringToBytes32 = (str: string): string => {
-  const hex = Buffer.from(str).toString('hex');
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(str);
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
   return '0x' + hex.padEnd(64, '0');
 };
 
-// Helper to convert bytes32 to string
+// Helper to convert bytes32 to string (browser-compatible)
 export const bytes32ToString = (bytes32: string): string => {
   const hex = bytes32.slice(2);
-  const str = Buffer.from(hex, 'hex').toString('utf8');
-  return str.replace(/\0/g, '');
+  const bytes: number[] = [];
+  for (let i = 0; i < hex.length; i += 2) {
+    const byte = parseInt(hex.substring(i, i + 2), 16);
+    if (byte !== 0) bytes.push(byte);
+  }
+  const decoder = new TextDecoder();
+  return decoder.decode(new Uint8Array(bytes));
 };
