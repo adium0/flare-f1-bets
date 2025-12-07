@@ -4,6 +4,7 @@ import { Race, Bet, BetStatus, FtsoPrice, UserStats, ContractEvent } from '@/typ
 import { mockBets, mockFtsoPrice, mockUserStats, COSTON2_CONFIG } from '@/data/mockData';
 import { toast } from '@/hooks/use-toast';
 import { useContract } from '@/hooks/useContract';
+import { useWallet } from '@/context/WalletContext';
 import { stringToBytes32, bytes32ToString, getExplorerTxUrl } from '@/config/contract';
 import { getDrivers, getRaces, mapApiRaceToInternal, getDriverFullName, getDriverConstructor } from '@/services/f1ApiService';
 
@@ -18,6 +19,7 @@ interface BettingContextType {
   setRaceResult: (raceId: string, winningDriverId: string) => Promise<boolean>;
   refreshEvents: () => Promise<void>;
   getImpliedOdds: (raceId: string, driverId: string) => Promise<number>;
+  fetchUserBetsFromContract: (userAddress: string) => Promise<void>;
   isLoading: boolean;
   isContractReady: boolean;
 }
@@ -26,6 +28,7 @@ const BettingContext = createContext<BettingContextType | undefined>(undefined);
 
 export function BettingProvider({ children }: { children: ReactNode }) {
   const { contract, signer, provider, isReady: isContractReady } = useContract();
+  const { wallet } = useWallet();
   const [races, setRaces] = useState<Race[]>([]);
   const [bets, setBets] = useState<Bet[]>(mockBets);
   const [ftsoPrice, setFtsoPrice] = useState<FtsoPrice>(mockFtsoPrice);
@@ -93,9 +96,28 @@ export function BettingProvider({ children }: { children: ReactNode }) {
       const receipt = await tx.wait();
       console.log('Transaction confirmed:', receipt);
 
+      // Extract betId from BetPlaced event
+      let contractBetId: string | undefined;
+      if (receipt.logs) {
+        const iface = contract.interface;
+        for (const log of receipt.logs) {
+          try {
+            const parsedLog = iface.parseLog(log);
+            if (parsedLog && parsedLog.name === 'BetPlaced') {
+              contractBetId = parsedLog.args[0]; // betId is first arg
+              console.log('Extracted betId from event:', contractBetId);
+              break;
+            }
+          } catch (e) {
+            // Not a BetPlaced event, continue
+          }
+        }
+      }
+
       // Create local bet record
       const newBet: Bet = {
         id: `bet-${Date.now()}`,
+        contractBetId: contractBetId,
         raceId,
         raceName: race.name,
         driverId,
@@ -210,7 +232,12 @@ export function BettingProvider({ children }: { children: ReactNode }) {
         throw new Error('Invalid bet for claiming');
       }
 
-      const betIdBytes = stringToBytes32(betId);
+      // Use contract betId if available, otherwise fallback to string conversion
+      if (!bet.contractBetId) {
+        throw new Error('Contract betId not found. Please refresh your bets.');
+      }
+
+      const betIdBytes = bet.contractBetId;
       
       console.log('Claiming payout for bet:', betIdBytes);
 
@@ -414,6 +441,85 @@ export function BettingProvider({ children }: { children: ReactNode }) {
     }
   }, [contract, races]);
 
+  // Fetch user bets from contract
+  const fetchUserBetsFromContract = useCallback(async (userAddress: string): Promise<void> => {
+    if (!contract || !provider) {
+      console.log('Contract not ready for fetching user bets');
+      return;
+    }
+
+    try {
+      // Get all bet IDs for this user
+      const betIds: string[] = await contract.getUserBets(userAddress);
+      console.log('Fetched bet IDs from contract:', betIds.length);
+
+      // Fetch bet details for each betId
+      const fetchedBets: Bet[] = [];
+      for (const betIdBytes of betIds) {
+        try {
+          const betInfo = await contract.getBetInfo(betIdBytes);
+          const raceInfo = await contract.getRaceInfo(betInfo.raceId);
+          
+          // Convert bytes32 to string for raceId and driverId
+          const raceIdStr = bytes32ToString(betInfo.raceId);
+          const driverIdStr = bytes32ToString(betInfo.driverId);
+          
+          // Find race and driver in local state
+          const race = races.find(r => r.id === raceIdStr);
+          const driver = race?.drivers.find(d => d.id === driverIdStr);
+          
+          if (race && driver) {
+            // Map contract status (0=Pending, 1=Won, 2=Lost, 3=Claimed)
+            const statusMap: BetStatus[] = ['pending', 'won', 'lost', 'claimed'];
+            const betStatus = statusMap[betInfo.status] || 'pending';
+            
+            // Get potential payout
+            let potentialPayout = 0;
+            if (betInfo.status === 1) { // Won
+              potentialPayout = Number(ethers.formatEther(betInfo.payout));
+            } else if (betInfo.status === 0) { // Pending
+              const calculatedPayout = await contract.calculatePayout(betIdBytes);
+              potentialPayout = Number(ethers.formatEther(calculatedPayout));
+            }
+
+            const bet: Bet = {
+              id: `bet-${betIdBytes.slice(0, 10)}`,
+              contractBetId: betIdBytes,
+              raceId: raceIdStr,
+              raceName: race.name,
+              driverId: driverIdStr,
+              driverName: driver.name,
+              driverNumber: driver.number,
+              team: driver.team,
+              stake: Number(ethers.formatEther(betInfo.amount)),
+              odds: driver.odds,
+              status: betStatus,
+              potentialPayout,
+              placedAt: new Date().toISOString(), // Could fetch from events if needed
+            };
+            
+            fetchedBets.push(bet);
+          }
+        } catch (error) {
+          console.error(`Failed to fetch bet info for ${betIdBytes}:`, error);
+        }
+      }
+
+      // Merge with existing bets (avoid duplicates)
+      setBets(prev => {
+        const existingContractBetIds = new Set(
+          prev.filter(b => b.contractBetId).map(b => b.contractBetId)
+        );
+        const newBets = fetchedBets.filter(b => !existingContractBetIds.has(b.contractBetId));
+        return [...newBets, ...prev];
+      });
+
+      console.log('Synced bets from contract:', fetchedBets.length);
+    } catch (error) {
+      console.error('Failed to fetch user bets:', error);
+    }
+  }, [contract, provider, races]);
+
   // Fetch contract events
   const refreshEvents = useCallback(async () => {
     if (!contract || !provider) {
@@ -426,10 +532,13 @@ export function BettingProvider({ children }: { children: ReactNode }) {
       const fromBlock = Math.max(0, currentBlock - 10000); // Last ~10k blocks
 
       // Query all event types
-      const [betPlacedEvents, raceResultEvents, payoutEvents] = await Promise.all([
+      const [betPlacedEvents, raceResultEvents, payoutEvents, raceCreatedEvents, driverAddedEvents, raceClosedEvents] = await Promise.all([
         contract.queryFilter('BetPlaced', fromBlock, currentBlock),
         contract.queryFilter('RaceResultSet', fromBlock, currentBlock),
         contract.queryFilter('PayoutClaimed', fromBlock, currentBlock),
+        contract.queryFilter('RaceCreated', fromBlock, currentBlock),
+        contract.queryFilter('DriverAdded', fromBlock, currentBlock),
+        contract.queryFilter('RaceClosed', fromBlock, currentBlock),
       ]);
 
       const events: ContractEvent[] = [];
@@ -485,6 +594,59 @@ export function BettingProvider({ children }: { children: ReactNode }) {
             betId: event.args[0],
             user: event.args[1],
             amount: ethers.formatEther(event.args[2] || 0),
+          },
+        });
+      }
+
+      // Process RaceCreated events
+      for (const event of raceCreatedEvents) {
+        if (!('args' in event)) continue;
+        const block = await event.getBlock();
+        events.push({
+          id: `${event.transactionHash}-${event.index}`,
+          type: 'RaceCreated',
+          txHash: event.transactionHash,
+          blockNumber: event.blockNumber,
+          timestamp: block.timestamp * 1000,
+          data: {
+            raceId: event.args[0],
+            name: event.args[1],
+            cutoffTime: event.args[2]?.toString(),
+          },
+        });
+      }
+
+      // Process DriverAdded events
+      for (const event of driverAddedEvents) {
+        if (!('args' in event)) continue;
+        const block = await event.getBlock();
+        events.push({
+          id: `${event.transactionHash}-${event.index}`,
+          type: 'DriverAdded',
+          txHash: event.transactionHash,
+          blockNumber: event.blockNumber,
+          timestamp: block.timestamp * 1000,
+          data: {
+            raceId: event.args[0],
+            driverId: event.args[1],
+            name: event.args[2],
+          },
+        });
+      }
+
+      // Process RaceClosed events (if needed in future)
+      for (const event of raceClosedEvents) {
+        if (!('args' in event)) continue;
+        const block = await event.getBlock();
+        events.push({
+          id: `${event.transactionHash}-${event.index}`,
+          type: 'RaceResultSet', // Use existing type for now, or add new type
+          txHash: event.transactionHash,
+          blockNumber: event.blockNumber,
+          timestamp: block.timestamp * 1000,
+          data: {
+            raceId: event.args[0],
+            action: 'closed',
           },
         });
       }
@@ -546,6 +708,13 @@ export function BettingProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(interval);
   }, []);
 
+  // Sync user bets when wallet connects
+  useEffect(() => {
+    if (wallet.isConnected && wallet.address && isContractReady) {
+      fetchUserBetsFromContract(wallet.address);
+    }
+  }, [wallet.isConnected, wallet.address, isContractReady, fetchUserBetsFromContract]);
+
   return (
     <BettingContext.Provider value={{
       races,
@@ -558,6 +727,7 @@ export function BettingProvider({ children }: { children: ReactNode }) {
       setRaceResult,
       refreshEvents,
       getImpliedOdds,
+      fetchUserBetsFromContract,
       isLoading,
       isContractReady,
     }}>

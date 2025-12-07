@@ -132,6 +132,34 @@ function EventCard({ event }: { event: ContractEvent }) {
                 </p>
               </>
             )}
+
+            {event.type === 'RaceCreated' && (
+              <>
+                <p className="text-foreground">
+                  <span className="text-muted-foreground">Race:</span>{' '}
+                  <span className="font-semibold">{event.data.name || bytes32ToString(event.data.raceId)}</span>
+                </p>
+                {event.data.cutoffTime && (
+                  <p className="text-foreground">
+                    <span className="text-muted-foreground">Cutoff:</span>{' '}
+                    <span className="text-xs">{new Date(Number(event.data.cutoffTime) * 1000).toLocaleString()}</span>
+                  </p>
+                )}
+              </>
+            )}
+
+            {event.type === 'DriverAdded' && (
+              <>
+                <p className="text-foreground">
+                  <span className="text-muted-foreground">Driver:</span>{' '}
+                  <span className="font-semibold">{event.data.name || bytes32ToString(event.data.driverId)}</span>
+                </p>
+                <p className="text-foreground">
+                  <span className="text-muted-foreground">Race ID:</span>{' '}
+                  <span className="text-xs font-mono">{bytes32ToString(event.data.raceId) || 'N/A'}</span>
+                </p>
+              </>
+            )}
           </div>
 
           {/* Transaction link */}
@@ -160,7 +188,7 @@ export default function TransactionsPage() {
   const { contractEvents, refreshEvents, isContractReady } = useBetting();
   const { wallet } = useWallet();
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [filter, setFilter] = useState<'all' | 'BetPlaced' | 'RaceResultSet' | 'PayoutClaimed'>('all');
+  const [filter, setFilter] = useState<'all' | 'BetPlaced' | 'RaceResultSet' | 'PayoutClaimed' | 'RaceCreated' | 'DriverAdded'>('all');
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -177,6 +205,8 @@ export default function TransactionsPage() {
     BetPlaced: contractEvents.filter(e => e.type === 'BetPlaced').length,
     RaceResultSet: contractEvents.filter(e => e.type === 'RaceResultSet').length,
     PayoutClaimed: contractEvents.filter(e => e.type === 'PayoutClaimed').length,
+    RaceCreated: contractEvents.filter(e => e.type === 'RaceCreated').length,
+    DriverAdded: contractEvents.filter(e => e.type === 'DriverAdded').length,
   };
 
   return (
@@ -188,7 +218,7 @@ export default function TransactionsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         {/* Filter Tabs */}
         <div className="flex gap-2 flex-wrap">
-          {(['all', 'BetPlaced', 'RaceResultSet', 'PayoutClaimed'] as const).map((type) => (
+          {(['all', 'BetPlaced', 'RaceResultSet', 'PayoutClaimed', 'RaceCreated', 'DriverAdded'] as const).map((type) => (
             <Button
               key={type}
               variant={filter === type ? 'default' : 'outline'}
@@ -196,7 +226,7 @@ export default function TransactionsPage() {
               onClick={() => setFilter(type)}
               className="gap-2"
             >
-              {type === 'all' ? 'All' : eventConfig[type].label}
+              {type === 'all' ? 'All' : eventConfig[type]?.label || type}
               <Badge variant="secondary" className="ml-1">
                 {eventCounts[type]}
               </Badge>

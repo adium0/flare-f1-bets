@@ -321,6 +321,7 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
         if (bet.driverId == race.winningDriverId) {
             // Winner - calculate parimutuel payout
             uint256 winningPool = driverPools[bet.raceId][bet.driverId];
+            require(winningPool > 0, "No winning pool");
             uint256 totalPool = race.totalPool;
             
             // Payout = (userStake / winningPool) * totalPool
@@ -336,7 +337,7 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
             
             emit PayoutClaimed(betId, msg.sender, netPayout);
         } else {
-            // Loser
+            // Loser - mark as lost
             bet.status = BetStatus.Lost;
             bet.payout = 0;
         }

@@ -19,6 +19,8 @@ export const BET_MANAGER_ABI = [
   "function getAllRaces() view returns (bytes32[])",
   "function getImpliedOdds(bytes32 raceId, bytes32 driverId) view returns (uint256)",
   "function calculatePayout(bytes32 betId) view returns (uint256)",
+  "function getBetInfo(bytes32 betId) view returns (address user, bytes32 raceId, bytes32 driverId, uint256 amount, uint8 status, uint256 payout)",
+  "function getRaceInfo(bytes32 raceId) view returns (string name, string circuit, uint256 cutoffTime, uint8 status, bytes32 winningDriverId, uint256 totalPool)",
   "function oracle() view returns (address)",
   "function minBetAmount() view returns (uint256)",
   "function maxBetAmount() view returns (uint256)",

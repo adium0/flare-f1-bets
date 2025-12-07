@@ -27,6 +27,7 @@ export interface Race {
 
 export interface Bet {
   id: string;
+  contractBetId?: string; // The actual betId from the contract
   raceId: string;
   raceName: string;
   driverId: string;
