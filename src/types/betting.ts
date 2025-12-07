@@ -64,3 +64,13 @@ export interface UserStats {
   pendingBets: number;
   winRate: number;
 }
+
+// Contract event types
+export interface ContractEvent {
+  id: string;
+  type: 'BetPlaced' | 'RaceResultSet' | 'PayoutClaimed' | 'RaceCreated' | 'DriverAdded';
+  txHash: string;
+  blockNumber: number;
+  timestamp: number;
+  data: Record<string, any>;
+}

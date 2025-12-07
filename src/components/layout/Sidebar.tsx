@@ -17,6 +17,7 @@ const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/races', icon: Trophy, label: 'Races' },
   { to: '/my-bets', icon: Ticket, label: 'My Bets' },
+  { to: '/transactions', icon: Zap, label: 'Transactions' },
   { to: '/oracle', icon: Shield, label: 'Oracle' },
 ];
 
