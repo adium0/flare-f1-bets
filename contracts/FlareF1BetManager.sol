@@ -6,13 +6,17 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title FlareF1BetManager
- * @notice Manages F1 race betting with oracle-based settlement
+ * @notice Parimutuel F1 race betting with oracle-based settlement
  * @dev MVP contract for Flare F1 Betting dApp - Coston2 testnet
+ * 
+ * PARIMUTUEL SYSTEM:
+ * - Odds are NOT fixed; they're derived from the betting pool
+ * - impliedOdds = (totalPool * 100) / driverPool
+ * - Payouts come from losing bets, distributed proportionally to winners
  * 
  * Production upgrades:
  * - Replace single oracle with FDC attestation verification
  * - Add Merkle proof validation for race results
- * - Implement proportional pool payout instead of fixed odds
  */
 contract FlareF1BetManager is Ownable, ReentrancyGuard {
     
@@ -35,7 +39,7 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
     struct Driver {
         bytes32 driverId;
         string name;
-        uint256 odds; // Stored as basis points (185 = 1.85x)
+        uint256 totalStake; // Total amount staked on this driver
     }
     
     struct Bet {
@@ -43,7 +47,6 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
         bytes32 raceId;
         bytes32 driverId;
         uint256 amount;
-        uint256 odds;
         BetStatus status;
         uint256 payout;
     }
@@ -60,14 +63,17 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
     mapping(bytes32 => Bet) public bets;
     mapping(address => bytes32[]) public userBets;
     
+    // Parimutuel pool tracking
+    mapping(bytes32 => mapping(bytes32 => uint256)) public driverPools; // raceId => driverId => totalStake
+    
     bytes32[] public allRaceIds;
     uint256 public betCounter;
     
     // ============ Events ============
     
     event RaceCreated(bytes32 indexed raceId, string name, uint256 cutoffTime);
-    event DriverAdded(bytes32 indexed raceId, bytes32 driverId, string name, uint256 odds);
-    event BetPlaced(bytes32 indexed betId, bytes32 indexed raceId, bytes32 driverId, address indexed user, uint256 amount, uint256 odds);
+    event DriverAdded(bytes32 indexed raceId, bytes32 driverId, string name);
+    event BetPlaced(bytes32 indexed betId, bytes32 indexed raceId, bytes32 driverId, address indexed user, uint256 amount);
     event RaceClosed(bytes32 indexed raceId);
     event RaceResultSet(bytes32 indexed raceId, bytes32 winningDriverId);
     event PayoutClaimed(bytes32 indexed betId, address indexed user, uint256 amount);
@@ -123,28 +129,25 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @notice Add a driver option for a race
+     * @notice Add a driver option for a race (no fixed odds - parimutuel system)
      * @param raceId Race identifier
      * @param driverId Driver identifier
      * @param name Driver name
-     * @param odds Betting odds in basis points (185 = 1.85x)
      */
     function addDriver(
         bytes32 raceId,
         bytes32 driverId,
-        string memory name,
-        uint256 odds
+        string memory name
     ) external onlyOwner raceExists(raceId) {
         require(races[raceId].status == RaceStatus.Upcoming, "Race not upcoming");
-        require(odds >= 100, "Odds must be >= 1.00x");
         
         raceDrivers[raceId].push(Driver({
             driverId: driverId,
             name: name,
-            odds: odds
+            totalStake: 0
         }));
         
-        emit DriverAdded(raceId, driverId, name, odds);
+        emit DriverAdded(raceId, driverId, name);
     }
     
     /**
@@ -170,7 +173,7 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
     // ============ Betting Functions ============
     
     /**
-     * @notice Place a bet on a driver to win a race
+     * @notice Place a bet on a driver to win a race (parimutuel - odds determined by pool)
      * @param raceId Race identifier
      * @param driverId Driver identifier
      */
@@ -186,34 +189,80 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
         require(msg.value >= minBetAmount, "Below minimum bet");
         require(msg.value <= maxBetAmount, "Above maximum bet");
         
-        // Find driver and get odds
-        uint256 odds = 0;
+        // Verify driver exists
+        bool driverExists = false;
         Driver[] storage drivers = raceDrivers[raceId];
         for (uint i = 0; i < drivers.length; i++) {
             if (drivers[i].driverId == driverId) {
-                odds = drivers[i].odds;
+                driverExists = true;
+                drivers[i].totalStake += msg.value;
                 break;
             }
         }
-        require(odds > 0, "Invalid driver");
+        require(driverExists, "Invalid driver");
         
         // Create bet
-        bytes32 betId = keccak256(abi.encodePacked(msg.sender, raceId, driverId, betCounter++));
+        bytes32 betId = keccak256(abi.encodePacked(msg.sender, raceId, driverId, betCounter++, block.timestamp));
         
         bets[betId] = Bet({
             user: msg.sender,
             raceId: raceId,
             driverId: driverId,
             amount: msg.value,
-            odds: odds,
             status: BetStatus.Pending,
             payout: 0
         });
         
         userBets[msg.sender].push(betId);
-        race.totalPool += msg.value;
         
-        emit BetPlaced(betId, raceId, driverId, msg.sender, msg.value, odds);
+        // Update pools
+        race.totalPool += msg.value;
+        driverPools[raceId][driverId] += msg.value;
+        
+        emit BetPlaced(betId, raceId, driverId, msg.sender, msg.value);
+    }
+    
+    // ============ Odds Functions (Parimutuel) ============
+    
+    /**
+     * @notice Get implied odds for a driver (parimutuel calculation)
+     * @param raceId Race identifier
+     * @param driverId Driver identifier
+     * @return Odds in x100 format (e.g., 185 = 1.85x)
+     * 
+     * Formula: impliedOdds = (totalPool * 100) / driverPool
+     * If no bets on driver, returns 0 (undefined odds)
+     */
+    function getImpliedOdds(bytes32 raceId, bytes32 driverId) 
+        external 
+        view 
+        raceExists(raceId) 
+        returns (uint256) 
+    {
+        uint256 driverPool = driverPools[raceId][driverId];
+        uint256 totalPool = races[raceId].totalPool;
+        
+        if (driverPool == 0 || totalPool == 0) {
+            return 0; // No bets yet
+        }
+        
+        // Calculate odds: (totalPool / driverPool) * 100
+        // Using * 100 for precision (185 = 1.85x)
+        return (totalPool * 100) / driverPool;
+    }
+    
+    /**
+     * @notice Get the current pool size for a driver
+     * @param raceId Race identifier
+     * @param driverId Driver identifier
+     * @return Amount staked on this driver
+     */
+    function getDriverPool(bytes32 raceId, bytes32 driverId) 
+        external 
+        view 
+        returns (uint256) 
+    {
+        return driverPools[raceId][driverId];
     }
     
     // ============ Oracle Functions ============
@@ -255,8 +304,11 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
     // ============ Payout Functions ============
     
     /**
-     * @notice Claim payout for a winning bet
+     * @notice Claim payout for a winning bet (parimutuel payout)
      * @param betId Bet identifier
+     * 
+     * Parimutuel payout formula:
+     * payout = (betAmount / winningPool) * totalPool * (1 - platformFee)
      */
     function claimPayout(bytes32 betId) external nonReentrant {
         Bet storage bet = bets[betId];
@@ -267,8 +319,12 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
         require(race.status == RaceStatus.Settled, "Race not settled");
         
         if (bet.driverId == race.winningDriverId) {
-            // Winner - calculate payout
-            uint256 grossPayout = (bet.amount * bet.odds) / 100;
+            // Winner - calculate parimutuel payout
+            uint256 winningPool = driverPools[bet.raceId][bet.driverId];
+            uint256 totalPool = race.totalPool;
+            
+            // Payout = (userStake / winningPool) * totalPool
+            uint256 grossPayout = (bet.amount * totalPool) / winningPool;
             uint256 fee = (grossPayout * platformFee) / 10000;
             uint256 netPayout = grossPayout - fee;
             
@@ -287,13 +343,20 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @notice Calculate potential payout for a bet
+     * @notice Calculate potential payout for a bet (before race result)
      * @param betId Bet identifier
-     * @return Potential payout amount
+     * @return Estimated payout based on current pool state
      */
     function calculatePayout(bytes32 betId) external view returns (uint256) {
         Bet storage bet = bets[betId];
-        uint256 grossPayout = (bet.amount * bet.odds) / 100;
+        Race storage race = races[bet.raceId];
+        
+        uint256 driverPool = driverPools[bet.raceId][bet.driverId];
+        uint256 totalPool = race.totalPool;
+        
+        if (driverPool == 0) return 0;
+        
+        uint256 grossPayout = (bet.amount * totalPool) / driverPool;
         uint256 fee = (grossPayout * platformFee) / 10000;
         return grossPayout - fee;
     }
@@ -310,6 +373,44 @@ contract FlareF1BetManager is Ownable, ReentrancyGuard {
     
     function getAllRaces() external view returns (bytes32[] memory) {
         return allRaceIds;
+    }
+    
+    function getRaceInfo(bytes32 raceId) external view returns (
+        string memory name,
+        string memory circuit,
+        uint256 cutoffTime,
+        RaceStatus status,
+        bytes32 winningDriverId,
+        uint256 totalPool
+    ) {
+        Race storage race = races[raceId];
+        return (
+            race.name,
+            race.circuit,
+            race.cutoffTime,
+            race.status,
+            race.winningDriverId,
+            race.totalPool
+        );
+    }
+    
+    function getBetInfo(bytes32 betId) external view returns (
+        address user,
+        bytes32 raceId,
+        bytes32 driverId,
+        uint256 amount,
+        BetStatus status,
+        uint256 payout
+    ) {
+        Bet storage bet = bets[betId];
+        return (
+            bet.user,
+            bet.raceId,
+            bet.driverId,
+            bet.amount,
+            bet.status,
+            bet.payout
+        );
     }
     
     // ============ Emergency Functions ============
