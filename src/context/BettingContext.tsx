@@ -1,10 +1,11 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { Race, Bet, BetStatus, FtsoPrice, UserStats, ContractEvent } from '@/types/betting';
-import { mockRaces, mockBets, mockFtsoPrice, mockUserStats, COSTON2_CONFIG } from '@/data/mockData';
+import { mockBets, mockFtsoPrice, mockUserStats, COSTON2_CONFIG } from '@/data/mockData';
 import { toast } from '@/hooks/use-toast';
 import { useContract } from '@/hooks/useContract';
 import { stringToBytes32, bytes32ToString, getExplorerTxUrl } from '@/config/contract';
+import { getDrivers, getRaces, mapApiRaceToInternal, getDriverFullName, getDriverConstructor } from '@/services/f1ApiService';
 
 interface BettingContextType {
   races: Race[];
@@ -25,12 +26,34 @@ const BettingContext = createContext<BettingContextType | undefined>(undefined);
 
 export function BettingProvider({ children }: { children: ReactNode }) {
   const { contract, signer, provider, isReady: isContractReady } = useContract();
-  const [races, setRaces] = useState<Race[]>(mockRaces);
+  const [races, setRaces] = useState<Race[]>([]);
   const [bets, setBets] = useState<Bet[]>(mockBets);
   const [ftsoPrice, setFtsoPrice] = useState<FtsoPrice>(mockFtsoPrice);
   const [userStats, setUserStats] = useState<UserStats>(mockUserStats);
   const [contractEvents, setContractEvents] = useState<ContractEvent[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Load races from F1 API on mount
+  useEffect(() => {
+    async function loadRaces() {
+      try {
+        const [driversResponse, racesResponse] = await Promise.all([
+          getDrivers('2025'),
+          getRaces('2025'),
+        ]);
+        
+        const drivers = driversResponse.MRData.DriverTable.Drivers;
+        const apiRaces = racesResponse.MRData.RaceTable.Races;
+        
+        // Map API races to internal format
+        const mappedRaces = apiRaces.slice(0, 8).map(race => mapApiRaceToInternal(race, drivers));
+        setRaces(mappedRaces);
+      } catch (error) {
+        console.error('Failed to load F1 data:', error);
+      }
+    }
+    loadRaces();
+  }, []);
 
   // Place a bet with real MetaMask transaction
   const placeBet = useCallback(async (raceId: string, driverId: string, stake: number): Promise<boolean> => {
