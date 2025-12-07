@@ -119,7 +119,7 @@ export const mockUserStats: UserStats = {
   winRate: 58.3,
 };
 
-// Contract addresses for Coston2 testnet (placeholders)
+// Contract addresses for Coston2 testnet
 export const COSTON2_CONFIG = {
   chainId: 114,
   chainName: 'Flare Coston2',
@@ -131,7 +131,8 @@ export const COSTON2_CONFIG = {
     decimals: 18,
   },
   contracts: {
-    betManager: '0x0000000000000000000000000000000000000000', // Deploy and replace
-    mockToken: '0x0000000000000000000000000000000000000000',  // Deploy and replace
+    // Updated contract address for debit/credit transactions
+    betManager: '0x779f227cddecbd0ef22033f520b926a9a3ee1b0a',
+    mockToken: '0x0000000000000000000000000000000000000000',
   },
 };
